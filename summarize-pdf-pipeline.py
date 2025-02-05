@@ -20,9 +20,9 @@ MODEL_NAME = "qwen2.5-7b-instruct-1m"
 TOKENIZER_NAME = "Qwen/Qwen1.5-7B"
 
 # Chunking and Generation Configuration
-MAX_CONTEXT_LENGTH = 4096  # Slightly below the model's n_ctx (8000) for safety.
+MAX_CONTEXT_LENGTH = 4096  # Slightly below the model's n_ctx for safety.
 SAFETY_MARGIN = 0.9        # Use a higher safety margin to avoid exceeding the context window.
-MAX_TOKENS = 1024          # Set to the maximum token length (evaluation batch size).
+MAX_TOKENS = 1024          # Maximum token length for generation.
 TEMPERATURE = 0.3          # Lower temperature for more deterministic summarization.
 
 # Keyword Extraction Parameters
@@ -47,7 +47,45 @@ MAX_GPU_TEMP = 80         # Maximum GPU temperature (°C)
 COOL_DOWN_PERIOD = 60     # Seconds to wait if GPU is too hot
 
 ###############################
-#       UTILITY CLASSES       #
+#   GLOBAL HELPER FUNCTIONS   #
+###############################
+def global_load_reject_keywords():
+    """
+    Loads reject keywords from REJECT_KEYWORDS_FILE.
+    If the file does not exist, returns a default list.
+    """
+    if os.path.exists(REJECT_KEYWORDS_FILE):
+        with open(REJECT_KEYWORDS_FILE, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+    return ["the", "and", "or", "but", "if", "to", "a", "an", "in", "of", "with", "for", "on"]
+
+def load_text(filename):
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        print(f"Error loading file {filename}: {e}")
+        return ""
+
+def save_text(filename, content):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        print(f"Error saving file {filename}: {e}")
+
+def store_lm_response(chunk_index, response):
+    filename = os.path.join(INTERMEDIATE_SUMMARY_DIR, f"lm_response_{chunk_index}.txt")
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(response)
+        print(f"Stored LM Studio response for chunk {chunk_index} in {filename}")
+    except Exception as e:
+        print(f"Error storing LM Studio response for chunk {chunk_index}: {e}")
+
+###############################
+#        UTILITY CLASSES      #
 ###############################
 # === Tokenization Class ===
 class TokenCounter:
@@ -60,6 +98,7 @@ class TokenCounter:
 
     def count_tokens(self, text):
         if self.tokenizer is None:
+            # Rough estimate if tokenizer is not available.
             return int(len(text.split()) * 1.3)
         return len(self.tokenizer.encode(text))
 
@@ -77,7 +116,8 @@ class PDFProcessor:
             page_text = page.extract_text()
             text_data[f"Page {i+1}"] = page_text.strip() if page_text else ""
             print(f"✔ Extracted text from Page {i+1}")
-        with open(PAGE_TEXT_FILE, "w", encoding="utf-8") as f:
+        # Save to the output file specified for this processor
+        with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(text_data, f, indent=4)
         print(f"✅ Extracted text from {len(text_data)} pages.\n")
         return text_data
@@ -182,6 +222,7 @@ class Chunker:
         chunks = []
         current_chunk = ""
         current_tokens = 0
+        # Simple sentence split based on periods.
         sentences = text.replace(".\n", ". \n").split(". ")
         for sentence in sentences:
             sentence = sentence.strip()
@@ -320,8 +361,7 @@ class ResponseProcessor:
           - Trimming the result to MAX_CONTEXT_LENGTH words.
         Returns the trimmed text.
         """
-        # Load reject words from the same file used during keyword extraction.
-        reject_words = set(load_reject_keywords())
+        reject_words = set(global_load_reject_keywords())
         words = text.split()
         filtered_words = [word for word in words if word.lower() not in reject_words]
         freq = Counter(word.lower() for word in filtered_words)
@@ -350,34 +390,9 @@ class ResponseProcessor:
         save_text(self.final_summary_file, new_final)
         print(f"Final trimmed summary appended to {self.final_summary_file}")
 
-
-# === Text Processing Functions ===
-def load_text(filename):
-    try:
-        with open(filename, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        print(f"Error loading file {filename}: {e}")
-        return ""
-def save_text(filename, content):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(content)
-    except Exception as e:
-        print(f"Error saving file {filename}: {e}")
-
-# === Function: Store LM Studio Response per Chunk ===
-def store_lm_response(chunk_index, response):
-    filename = os.path.join(INTERMEDIATE_SUMMARY_DIR, f"lm_response_{chunk_index}.txt")
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(response)
-        print(f"Stored LM Studio response for chunk {chunk_index} in {filename}")
-    except Exception as e:
-        print(f"Error storing LM Studio response for chunk {chunk_index}: {e}")
-
-
+###############################
+#    Summarization Pipeline   #
+###############################
 class SummarizationPipeline:
     """Orchestrates the entire summarization process."""
     def __init__(self):
